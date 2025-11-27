@@ -8,17 +8,19 @@ import sys
 from dotenv import load_dotenv
 import requests
 
-load_dotenv()
+load_dotenv(override=True)
 
 VK_CLOUD_TOKEN = os.getenv('VK_CLOUD_AUTH_TOKEN')
 PROJECT_ID = os.getenv('VK_CLOUD_PROJECT_ID')
-API_URL = os.getenv('VK_CLOUD_API_URL', 'https://api.cloud.vk.com')
+NOVA_API_URL = 'https://infra.mail.ru:8774/v2.1'
+NEUTRON_API_URL = 'https://infra.mail.ru:9696/v2.0'
+
 VM_ID = os.getenv('VM_ID')
 EXTERNAL_NETWORK_ID = os.getenv('EXTERNAL_NETWORK_ID')
 
 def test_connection():
     """Тестирование подключения к API"""
-    print("🔍 Проверка подключения к VK Cloud API")
+    print("Проверка подключения к VK Cloud API")
     print("=" * 60)
     
     # Проверка конфигурации
@@ -27,84 +29,93 @@ def test_connection():
         "VK_CLOUD_PROJECT_ID": PROJECT_ID,
         "VM_ID": VM_ID,
         "EXTERNAL_NETWORK_ID": EXTERNAL_NETWORK_ID,
-        "VK_CLOUD_API_URL": API_URL
+        "NOVA_API_URL": NOVA_API_URL,
+        "NEUTRON_API_URL": NEUTRON_API_URL
     }
     
-    print("\n📋 Конфигурация:")
+    print("\nКонфигурация:")
     for key, value in checks.items():
-        status = "✅" if value else "❌"
+        status = "OK" if value else "ОШИБКА"
         display_value = value[:20] + "..." if len(str(value)) > 20 else value
         print(f"  {status} {key}: {display_value}")
     
     if not all(checks.values()):
-        print("\n❌ Не все параметры конфигурации установлены!")
+        print("\nНе все параметры конфигурации установлены!")
         return False
     
     # Тест API
-    print("\n🌐 Тестирование API запросов:")
+    print("\nТестирование API запросов:")
     
     headers = {
         'X-Auth-Token': VK_CLOUD_TOKEN,
         'Content-Type': 'application/json'
     }
     
-    # Тест 1: Получение информации о проекте
+    # Тест 1: Проверка Neutron API (сети)
     try:
-        url = f"{API_URL}/v2.0/networks"
+        print(f"  Checking Neutron API ({NEUTRON_API_URL})...")
+        url = f"{NEUTRON_API_URL}/networks"
         response = requests.get(url, headers=headers, timeout=10)
         
         if response.status_code == 200:
-            print("  ✅ Подключение к API успешно")
-        else:
-            print(f"  ❌ Ошибка API: {response.status_code}")
-            print(f"     {response.text}")
-            return False
+            print("  Neutron API доступен")
             
-    except Exception as e:
-        print(f"  ❌ Ошибка подключения: {e}")
-        return False
-    
-    # Тест 2: Получение информации о ВМ
-    try:
-        url = f"{API_URL}/v2.1/servers/{VM_ID}"
-        response = requests.get(url, headers=headers, timeout=10)
-        
-        if response.status_code == 200:
-            print("  ✅ ВМ найдена и доступна")
-            vm_info = response.json().get('server', {})
-            print(f"     Статус: {vm_info.get('status')}")
-            print(f"     Имя: {vm_info.get('name')}")
-        elif response.status_code == 404:
-            print(f"  ❌ ВМ не найдена (ID: {VM_ID})")
-            return False
-        else:
-            print(f"  ❌ Ошибка при получении информации о ВМ: {response.status_code}")
-            return False
-            
-    except Exception as e:
-        print(f"  ❌ Ошибка при получении информации о ВМ: {e}")
-        return False
-    
-    # Тест 3: Проверка сети
-    try:
-        url = f"{API_URL}/v2.0/networks"
-        response = requests.get(url, headers=headers, timeout=10)
-        
-        if response.status_code == 200:
             networks = response.json().get('networks', [])
             ext_net = next((n for n in networks if n['id'] == EXTERNAL_NETWORK_ID or n['name'] == EXTERNAL_NETWORK_ID), None)
             
             if ext_net:
-                print(f"  ✅ Внешняя сеть найдена: {ext_net.get('name')}")
+                print(f"     Внешняя сеть найдена: {ext_net.get('name')}")
             else:
-                print(f"  ⚠️  Сеть не найдена. Доступные сети:")
-                for net in networks:
-                    print(f"     - {net['name']} ({net['id']})")
-                    
+                print(f"     Сеть {EXTERNAL_NETWORK_ID} не найдена. Доступно сетей: {len(networks)}")
+        else:
+            print(f"  Ошибка Neutron API: {response.status_code}")
+            print(f"     {response.text}")
+            return False
+            
     except Exception as e:
-        print(f"  ⚠️  Ошибка при проверке сети: {e}")
+        print(f"  Ошибка подключения к Neutron: {e}")
+        return False
     
-    print("\n✅ Все проверки пройдены успешно!")
+    # Тест 2: Проверка Nova API (серверы)
+    try:
+        print(f"  Checking Nova API ({NOVA_API_URL})...")
+        url = f"{NOVA_API_URL}/servers/{VM_ID}"
+        response = requests.get(url, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            print("  Nova API доступен и ВМ найдена")
+            vm_info = response.json().get('server', {})
+            print(f"     Статус: {vm_info.get('status')}")
+            print(f"     Имя: {vm_info.get('name')}")
+        elif response.status_code == 404:
+            print(f"  ВМ не найдена (ID: {VM_ID})")
+            
+            # Попытка получить список всех серверов
+            try:
+                list_url = f"{NOVA_API_URL}/servers/detail"
+                list_resp = requests.get(list_url, headers=headers, timeout=10)
+                if list_resp.status_code == 200:
+                    servers = list_resp.json().get('servers', [])
+                    print("\n  Доступные серверы в проекте:")
+                    if not servers:
+                        print("     (нет серверов)")
+                    for srv in servers:
+                        print(f"     - {srv['name']} (ID: {srv['id']}) | Status: {srv['status']}")
+                else:
+                    print(f"  Не удалось получить список серверов: {list_resp.status_code}")
+            except Exception as list_e:
+                print(f"  Ошибка при получении списка серверов: {list_e}")
+                
+            return False
+        else:
+            print(f"  Ошибка Nova API: {response.status_code}")
+            return False
+            
+    except Exception as e:
+        print(f"  Ошибка подключения к Nova: {e}")
+        return False
+    
+    print("\nВсе проверки пройдены успешно!")
     return True
 
 if __name__ == '__main__':
